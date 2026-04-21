@@ -35,7 +35,7 @@ Versão 4:
 #define TRUE -1
 
 // tipos de dados
-typedef float data_t;
+typedef double data_t;
 
 // Macros
 #define timedifference_msec(start, stop) ((double)(stop - start) * 1000.0 / CLOCKS_PER_SEC)
