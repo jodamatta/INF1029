@@ -1,6 +1,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <cuda_runtime.h>
 #include "comum.h"
 #include "gpu.h"
 
@@ -56,4 +57,91 @@ void processaVetoresThread(data_t *hmA, data_t *hvB, int nIncognitas) {
         }
 
     }
+}
+
+__global__
+void eliminaPassoKernel(data_t *dA, data_t *dB, int nIncognitas, int passo){
+    int linha = passo + blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (linha >= nIncognitas)
+        return;
+
+    data_t multiplicador = matriz(dA, linha, passo - 1, nIncognitas) / matriz(dA, passo - 1, passo - 1, nIncognitas);
+
+    for (int coluna = passo - 1; coluna < nIncognitas; coluna++){
+        matriz(dA, linha, coluna, nIncognitas) -= matriz(dA, passo - 1, coluna, nIncognitas) * multiplicador;
+    }
+
+    dB[linha] -= dB[passo - 1] * multiplicador;
+}
+
+void processaVetoresGPU(
+    data_t *hmA,
+    data_t *hvB,
+    int nIncognitas)
+{
+    data_t *dA;
+    data_t *dB;
+
+    size_t sizeA =
+        sizeof(data_t) *
+        nIncognitas *
+        nIncognitas;
+
+    size_t sizeB =
+        sizeof(data_t) *
+        nIncognitas;
+
+    cudaMalloc((void**)&dA, sizeA);
+    cudaMalloc((void**)&dB, sizeB);
+
+    cudaMemcpy(
+        dA,
+        hmA,
+        sizeA,
+        cudaMemcpyHostToDevice);
+
+    cudaMemcpy(
+        dB,
+        hvB,
+        sizeB,
+        cudaMemcpyHostToDevice);
+
+    for(int passo = 1;
+        passo < nIncognitas;
+        passo++)
+    {
+        int linhasRestantes =
+            nIncognitas - passo;
+
+        int blocks =
+            (linhasRestantes +
+             threadsPerBlock - 1)
+            / threadsPerBlock;
+
+        eliminaPassoKernel<<<
+            blocks,
+            threadsPerBlock>>>(
+                dA,
+                dB,
+                nIncognitas,
+                passo);
+
+        cudaDeviceSynchronize();
+    }
+
+    cudaMemcpy(
+        hmA,
+        dA,
+        sizeA,
+        cudaMemcpyDeviceToHost);
+
+    cudaMemcpy(
+        hvB,
+        dB,
+        sizeB,
+        cudaMemcpyDeviceToHost);
+
+    cudaFree(dA);
+    cudaFree(dB);
 }
