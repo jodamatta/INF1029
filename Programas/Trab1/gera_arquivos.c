@@ -1,9 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define N 2048
-
-int main() {
+int main(int argc, char **argv) {
+    int N = atoi(argv[1]);
     FILE *fA = fopen("matrizA.bin", "wb");
     FILE *fB = fopen("vetorB.bin", "wb");
 
@@ -17,19 +16,22 @@ int main() {
 
     for(int i = 0; i < N; i++)
     {
-        B[i] = i + 1;
-
         for(int j = 0; j < N; j++)
         {
-            A[i * N + j] = ((i + j) % 10) + 1;
-
             if(i == j)
-                A[i * N + j] += N;
+                A[i * N + j] = (float)(N + 1);
+            else
+                A[i * N + j] = 1.0f;
         }
+
+        B[i] = (float)(i + 1);
     }
 
     fwrite(A, sizeof(float), N * N, fA);
     fwrite(B, sizeof(float), N, fB);
+
+    fclose(fA);
+    fclose(fB);
 
     free(A);
     free(B);

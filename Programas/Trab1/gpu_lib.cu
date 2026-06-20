@@ -35,6 +35,16 @@ void *threadFunc(void *arg) {
     pthread_exit(ret);
 }
 
+
+/**
+ * @brief Executa a eliminação gaussiana utilizando múltiplas threads no host.
+ *
+ * Para cada passo da eliminação, as linhas abaixo do pivô são distribuídas entre as threads disponíveis.
+ *
+ * @param hmA Matriz A.
+ * @param hvB Vetor B.
+ * @param nIncognitas Número de incógnitas do sistema.
+ */
 void processaVetoresThread(data_t *hmA, data_t *hvB, int nIncognitas) {
     pthread_t threads[nThreads];
     threadArgs_t args[nThreads];
@@ -48,17 +58,39 @@ void processaVetoresThread(data_t *hmA, data_t *hvB, int nIncognitas) {
             args[t].hvB         = hvB;
             args[t].nIncognitas = nIncognitas;
             args[t].passo       = passo;
-            pthread_create(&threads[t], NULL, threadFunc, &args[t]);
+
+            int rc = pthread_create(&threads[t], NULL, threadFunc, &args[t]);
+
+            if(rc != 0) {
+                fprintf(stderr,"[ERROR 1] Falha ao criar thread %d\n", t);
+                exit(EXIT_FAILURE);
+            }
         }
 
         for(int t = 0; t < nThreads; t++) {
-            pthread_join(threads[t], (void **)&ret);
+            int rc = pthread_join(threads[t],(void **)&ret);
+
+            if(rc != 0) {
+                fprintf(stderr, "[ERROR 2] Falha no join de threads %d\n",t);
+                exit(EXIT_FAILURE);
+            }
             free(ret);
         }
 
     }
 }
 
+
+/**
+ * @brief Kernel CUDA responsável pela eliminação de linhas para um determinado passo do método de Gauss.
+ *
+ * Cada thread CUDA processa uma linha da matriz localizada abaixo da linha pivô.
+ *
+ * @param dA Matriz A armazenada na memória da GPU.
+ * @param dB Vetor B armazenado na memória da GPU.
+ * @param nIncognitas Número de incógnitas do sistema.
+ * @param passo Passo atual da eliminação gaussiana.
+ */
 __global__
 void eliminaPassoKernel(data_t *dA, data_t *dB, int nIncognitas, int passo){
     int linha = passo + blockIdx.x * blockDim.x + threadIdx.x;
@@ -75,72 +107,79 @@ void eliminaPassoKernel(data_t *dA, data_t *dB, int nIncognitas, int passo){
     dB[linha] -= dB[passo - 1] * multiplicador;
 }
 
-void processaVetoresGPU(
-    data_t *hmA,
-    data_t *hvB,
-    int nIncognitas)
-{
+
+/**
+ * @brief Executa a eliminação gaussiana utilizando CUDA.
+ *
+ * A matriz e o vetor são copiados para a memória da GPU, processados por meio de vários lançamentos de kernel e depois copiados de volta para a memória principal.
+ *
+ * @param hmA Matriz A.
+ * @param hvB Vetor B.
+ * @param nIncognitas Número de incógnitas do sistema.
+ */
+void processaVetoresGPU(data_t *hmA, data_t *hvB, int nIncognitas) {
     data_t *dA;
     data_t *dB;
 
-    size_t sizeA =
-        sizeof(data_t) *
-        nIncognitas *
-        nIncognitas;
+    size_t sizeA = sizeof(data_t) * nIncognitas *nIncognitas;
+    size_t sizeB = sizeof(data_t) * nIncognitas;
 
-    size_t sizeB =
-        sizeof(data_t) *
-        nIncognitas;
+    cudaError_t err;
 
-    cudaMalloc((void**)&dA, sizeA);
-    cudaMalloc((void**)&dB, sizeB);
-
-    cudaMemcpy(
-        dA,
-        hmA,
-        sizeA,
-        cudaMemcpyHostToDevice);
-
-    cudaMemcpy(
-        dB,
-        hvB,
-        sizeB,
-        cudaMemcpyHostToDevice);
-
-    for(int passo = 1;
-        passo < nIncognitas;
-        passo++)
-    {
-        int linhasRestantes =
-            nIncognitas - passo;
-
-        int blocks =
-            (linhasRestantes +
-             threadsPerBlock - 1)
-            / threadsPerBlock;
-
-        eliminaPassoKernel<<<
-            blocks,
-            threadsPerBlock>>>(
-                dA,
-                dB,
-                nIncognitas,
-                passo);
-
-        cudaDeviceSynchronize();
+    err = cudaMalloc((void**)&dA, sizeA);
+    if(err != cudaSuccess) {
+        fprintf(stderr, "[ERROR 3] cudaMalloc dA: %s\n", cudaGetErrorString(err));
+        cudaFree(dA);
+        return;
+    }
+    err = cudaMalloc((void**)&dB, sizeB);
+    if(err != cudaSuccess) {
+        fprintf(stderr, "[ERROR 4] cudaMalloc dB: %s\n", cudaGetErrorString(err));
+        cudaFree(dB);
+        return;
     }
 
-    cudaMemcpy(
-        hmA,
-        dA,
-        sizeA,
-        cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(dA, hmA, sizeA, cudaMemcpyHostToDevice);
+    if(err != cudaSuccess) {
+        fprintf(stderr, "[ERROR 5] cudaMemcpy matriz H->D falhou: %s\n", cudaGetErrorString(err));
+        return;
+    }
+    err = cudaMemcpy(dB, hvB, sizeB, cudaMemcpyHostToDevice);
+    if(err != cudaSuccess) {
+        fprintf(stderr, "[ERROR 6] cudaMemcpy vetor H->D falhou: %s\n", cudaGetErrorString(err));
+        return;
+    }
 
-    cudaMemcpy(
-        hvB,
-        dB,
-        sizeB,
-        cudaMemcpyDeviceToHost);
+    for(int passo = 1; passo < nIncognitas; passo++) {
+        int linhasRestantes = nIncognitas - passo;
+        int blocks = (linhasRestantes + threadsPerBlock - 1) / threadsPerBlock;
+
+        eliminaPassoKernel<<< blocks, threadsPerBlock>>>(dA, dB, nIncognitas,passo);
+        err = cudaGetLastError();
+
+        if(err != cudaSuccess) {
+            fprintf(stderr, "[ERROR 7] Falha ao lançar o kernel: %s\n", cudaGetErrorString(err));
+            return;
+        }
+        err = cudaDeviceSynchronize();
+
+        if(err != cudaSuccess) {
+            fprintf(stderr, "[ERROR 8] Falha ao sincronizar device: %s\n", cudaGetErrorString(err));
+            return;
+        }
+    }
+
+    err = cudaMemcpy(hmA, dA, sizeA, cudaMemcpyDeviceToHost);
+    if(err != cudaSuccess) {
+        fprintf(stderr, "[ERROR 9] cudaMemcpy matriz D->H falhou: %s\n", cudaGetErrorString(err));
+        return;
+    }
+    err = cudaMemcpy(hvB, dB, sizeB, cudaMemcpyDeviceToHost);
+    if(err != cudaSuccess) {
+        fprintf(stderr, "[ERROR 10] cudaMemcpy vetor D->H falhou: %s\n", cudaGetErrorString(err));
+        return;
+    }
+
 
     cudaFree(dA);
     cudaFree(dB);
